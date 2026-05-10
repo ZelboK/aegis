@@ -30,6 +30,7 @@ target_link_libraries(aegis_preload
 if(NEW_AEGIS_HAS_LLVM_BACKEND)
   target_link_libraries(aegis_preload
     PRIVATE
+      amdgpu_code_object_llvm
       amdgpu_instr_backend_llvm
   )
 endif()

@@ -65,7 +65,9 @@ std::string renderRewriteTraceJson(
   os << "\"rewriteId\":\"" << escapeJson(trace.rewriteId) << "\",";
   os << "\"kernel\":{\"name\":\"" << escapeJson(trace.kernel.name)
      << "\",\"arch\":\"" << escapeJson(trace.kernel.arch)
-     << "\",\"kernelObject\":" << trace.kernel.kernelObject << "},";
+     << "\",\"kernelObject\":" << trace.kernel.kernelObject
+     << ",\"metadataSource\":\"" << escapeJson(trace.kernel.metadataSource)
+     << "\"},";
   os << "\"instrumentation\":\""
      << instrumentationName(trace.plan.instrumentation) << "\",";
   os << "\"siteCount\":" << trace.plan.selectedSites.size() << ",";
@@ -107,8 +109,20 @@ std::string renderDispatchTraceJson(const DispatchTrace &trace) {
 ReproducerBundle buildReproducerBundle(
     const amdgpu_rewrite_core::RewriteResult &rewrite,
     const std::vector<DispatchTrace> &dispatches) {
+  return buildReproducerBundle(rewrite, dispatches, {});
+}
+
+ReproducerBundle buildReproducerBundle(
+    const amdgpu_rewrite_core::RewriteResult &rewrite,
+    const std::vector<DispatchTrace> &dispatches,
+    const std::vector<uint8_t> &originalCodeObjectBytes) {
   ReproducerBundle bundle;
+  if (!originalCodeObjectBytes.empty()) {
+    bundle.files.push_back({"original_code_object.bin", originalCodeObjectBytes});
+  }
   bundle.files.push_back({"patched_code_object.bin", rewrite.patched.bytes});
+  bundle.files.push_back(
+      {"rewrite_summary.txt", bytesFromString(renderRewriteSummary(rewrite.trace))});
   bundle.files.push_back(
       {"rewrite_trace.json", bytesFromString(renderRewriteTraceJson(rewrite.trace))});
   for (size_t i = 0; i < dispatches.size(); ++i) {

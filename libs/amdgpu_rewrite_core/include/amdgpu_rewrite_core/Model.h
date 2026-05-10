@@ -18,6 +18,7 @@ struct KernelModel {
   uint64_t entryPc = 0;
   ByteRange textRange;
   uint64_t textOffset = 0;
+  std::string metadataSource;
   std::string originalBytesHash;
 };
 
@@ -91,6 +92,7 @@ struct RewriteTrace {
   std::string rewriteId;
   KernelModel kernel;
   RewritePlanModel plan;
+  std::vector<SiteModel> analyzedSites;
   std::vector<StageTrace> stages;
   std::vector<PatchModel> patches;
   std::vector<TrampolineModel> trampolines;

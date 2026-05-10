@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 
+#include <vector>
+
 TEST(AegisbitOutputTest, RendersRewriteTraceSummaryAndJson) {
   amdgpu_rewrite_core::RewriteTrace trace;
   trace.rewriteId = "rewrite";
@@ -36,8 +38,26 @@ TEST(AegisbitOutputTest, BuildsReproducerBundle) {
   dispatch.status = "observed";
 
   auto bundle = aegisbit_output::buildReproducerBundle(rewrite, {dispatch});
-  ASSERT_EQ(bundle.files.size(), 3u);
+  ASSERT_EQ(bundle.files.size(), 4u);
   EXPECT_EQ(bundle.files[0].name, "patched_code_object.bin");
-  EXPECT_EQ(bundle.files[1].name, "rewrite_trace.json");
-  EXPECT_EQ(bundle.files[2].name, "dispatch_0.json");
+  EXPECT_EQ(bundle.files[1].name, "rewrite_summary.txt");
+  EXPECT_EQ(bundle.files[2].name, "rewrite_trace.json");
+  EXPECT_EQ(bundle.files[3].name, "dispatch_0.json");
+}
+
+TEST(AegisbitOutputTest, BuildsReproducerBundleWithOriginalBytes) {
+  amdgpu_rewrite_core::RewriteResult rewrite;
+  rewrite.patched.bytes = {4, 5, 6};
+  rewrite.trace.rewriteId = "rewrite";
+  aegisbit_output::DispatchTrace dispatch;
+  dispatch.dispatchId = 42;
+  dispatch.rewriteId = "rewrite";
+  dispatch.status = "rewritten-artifact";
+
+  auto bundle =
+      aegisbit_output::buildReproducerBundle(rewrite, {dispatch}, {1, 2, 3});
+  ASSERT_EQ(bundle.files.size(), 5u);
+  EXPECT_EQ(bundle.files[0].name, "original_code_object.bin");
+  EXPECT_EQ(bundle.files[0].bytes, std::vector<uint8_t>({1, 2, 3}));
+  EXPECT_EQ(bundle.files[1].name, "patched_code_object.bin");
 }

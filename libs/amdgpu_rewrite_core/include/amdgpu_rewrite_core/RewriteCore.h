@@ -3,6 +3,7 @@
 #ifndef AMDGPU_REWRITE_CORE_REWRITE_CORE_H
 #define AMDGPU_REWRITE_CORE_REWRITE_CORE_H
 
+#include "amdgpu_code_object/CodeObject.h"
 #include "amdgpu_instr_backend/Backend.h"
 #include "amdgpu_instr_backend/Result.h"
 #include "amdgpu_rewrite_core/Model.h"
@@ -34,7 +35,9 @@ struct RewriteRequest {
   uint64_t entryPc = 0;
   uint64_t textBase = 0;
   uint64_t textOffset = 0;
+  uint64_t textSize = 0;
   std::vector<uint8_t> codeObjectBytes;
+  const amdgpu_code_object::CodeObjectParser *codeObjectParser = nullptr;
   std::vector<RewriteSite> sites;
   std::vector<DaisyChainRoute> daisyChains;
 };

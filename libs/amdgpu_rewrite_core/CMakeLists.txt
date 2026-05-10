@@ -1,5 +1,7 @@
 add_library(amdgpu_rewrite_core STATIC
+  src/CodeObjectModel.cpp
   src/RewriteCore.cpp
+  src/SiteAnalysis.cpp
 )
 
 set_target_properties(amdgpu_rewrite_core PROPERTIES
@@ -13,6 +15,7 @@ target_include_directories(amdgpu_rewrite_core
 
 target_link_libraries(amdgpu_rewrite_core
   PUBLIC
+    amdgpu_code_object
     amdgpu_instr_backend
     amdgpu_pc_reloc
 )

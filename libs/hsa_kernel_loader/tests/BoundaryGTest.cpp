@@ -1,4 +1,4 @@
-//===-- BoundaryGTest.cpp - runtime boundary tests ------------*- C++ -*-===//
+//===-- BoundaryGTest.cpp - loader boundary tests --------------*- C++ -*-===//
 
 #include <gtest/gtest.h>
 
@@ -17,12 +17,11 @@ std::string readFile(const std::filesystem::path &path) {
 
 } // namespace
 
-TEST(AegisbitRuntimeBoundaryTest, RuntimeDoesNotUseOldCoordinator) {
-  const std::filesystem::path root = NEW_AEGIS_AEGISBIT_RUNTIME_DIR;
+TEST(HsaKernelLoaderBoundaryTest, InterfaceAvoidsRewriteAndConcreteHsaDeps) {
+  const std::filesystem::path root = NEW_AEGIS_HSA_KERNEL_LOADER_DIR;
   const std::vector<std::string> forbidden = {
-      "ProfilingRuntime", "RuntimeConfig", "BinaryRewriter", "KernelLauncher",
-      "LoadedKernelCache", "#include \"llvm/", "#include <llvm/", "llvm::",
-      "<hsa/"};
+      "#include \"llvm/", "#include <llvm/", "llvm::", "amdgpu_rewrite_core",
+      "aegisbit_runtime", "<hsa/"};
 
   for (const auto &entry : std::filesystem::recursive_directory_iterator(root)) {
     if (!entry.is_regular_file()) {

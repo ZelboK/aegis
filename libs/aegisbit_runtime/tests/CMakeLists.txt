@@ -15,3 +15,19 @@ target_compile_definitions(aegisbit_runtime_gtest
 )
 
 add_test(NAME AegisbitRuntimeGTest COMMAND aegisbit_runtime_gtest)
+
+if(NEW_AEGIS_HAS_LLVM_BACKEND)
+  add_executable(aegisbit_runtime_artifact_smoke_gtest
+    RuntimeArtifactSmokeGTest.cpp
+  )
+
+  target_link_libraries(aegisbit_runtime_artifact_smoke_gtest
+    PRIVATE
+      aegisbit_runtime
+      amdgpu_code_object_llvm
+      GTest::gtest_main
+  )
+
+  add_test(NAME AegisbitRuntimeArtifactSmokeGTest
+           COMMAND aegisbit_runtime_artifact_smoke_gtest)
+endif()

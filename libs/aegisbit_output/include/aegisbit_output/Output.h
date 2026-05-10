@@ -45,6 +45,11 @@ renderRewriteTraceJson(const amdgpu_rewrite_core::RewriteTrace &trace);
 buildReproducerBundle(const amdgpu_rewrite_core::RewriteResult &rewrite,
                       const std::vector<DispatchTrace> &dispatches);
 
+[[nodiscard]] ReproducerBundle
+buildReproducerBundle(const amdgpu_rewrite_core::RewriteResult &rewrite,
+                      const std::vector<DispatchTrace> &dispatches,
+                      const std::vector<uint8_t> &originalCodeObjectBytes);
+
 } // namespace aegisbit_output
 
 #endif // AEGISBIT_OUTPUT_OUTPUT_H

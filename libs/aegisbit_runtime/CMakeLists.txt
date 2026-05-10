@@ -16,6 +16,7 @@ target_link_libraries(aegisbit_runtime
     aegis_hsa_intercept
     amdgpu_rewrite_core
     aegisbit_output
+    hsa_kernel_loader
 )
 
 if(NEW_AEGIS_BUILD_TESTS)
