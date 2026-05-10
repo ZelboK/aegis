@@ -78,10 +78,13 @@ endif()
 
 add_subdirectory(libs/amdgpu_instr_backend)
 add_subdirectory(libs/amdgpu_pc_reloc)
+add_subdirectory(libs/amdgpu_rewrite_core)
+add_subdirectory(libs/aegisbit_output)
 if(NEW_AEGIS_HAS_LLVM_BACKEND)
   add_subdirectory(libs/amdgpu_instr_backend_llvm)
 endif()
 add_subdirectory(libs/hsa_intercept)
+add_subdirectory(libs/aegisbit_runtime)
 
 if(NEW_AEGIS_BUILD_PRELOAD AND AEGIS_HAS_HSA_INTERCEPT)
   add_subdirectory(apps/preload)
