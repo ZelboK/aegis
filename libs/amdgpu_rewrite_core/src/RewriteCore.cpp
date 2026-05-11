@@ -3,11 +3,16 @@
 #include "amdgpu_rewrite_core/RewriteCore.h"
 
 #include "amdgpu_pc_reloc/PatchPlanner.h"
+#include "amdgpu_rewrite_core/CodeObjectMutation.h"
 #include "amdgpu_rewrite_core/CodeObjectModel.h"
+#include "amdgpu_rewrite_core/CountingPayloadAbi.h"
+#include "amdgpu_rewrite_core/PayloadEmitter.h"
 #include "amdgpu_rewrite_core/SiteAnalysis.h"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -89,6 +94,227 @@ bool overlapsExistingPatch(const RewriteTrace &trace, uint64_t patchPc,
     }
   }
   return false;
+}
+
+bool appendTextBytes(RewriteResult &result, RewriteRequest &request,
+                     const std::vector<uint8_t> &payloadBytes,
+                     uint64_t &entryPc, std::string &error) {
+  TextAppendRequest appendRequest;
+  appendRequest.codeObjectBytes = result.patched.bytes;
+  appendRequest.textBase = result.trace.kernel.textSectionBase == 0
+                               ? request.textBase
+                               : result.trace.kernel.textSectionBase;
+  appendRequest.textOffset = result.trace.kernel.textSectionOffset == 0
+                                 ? request.textOffset
+                                 : result.trace.kernel.textSectionOffset;
+  appendRequest.textSize = result.trace.kernel.textSectionSize == 0
+                               ? textSize(request)
+                               : result.trace.kernel.textSectionSize;
+  appendRequest.bytesToAppend = payloadBytes;
+  auto appendResult = appendToText(appendRequest);
+  if (!appendResult) {
+    error = appendResult.error();
+    return false;
+  }
+  auto value = appendResult.takeValue();
+  result.patched.bytes = std::move(value.codeObjectBytes);
+  entryPc = value.appendedPc;
+  result.trace.kernel.textSectionSize = value.textSize;
+  return true;
+}
+
+std::string patchReason(InstrumentationLevel level) {
+  switch (level) {
+  case InstrumentationLevel::noopPatch:
+    return "direct-site-patch";
+  case InstrumentationLevel::dryPayload:
+    return "dry-payload-detour";
+  case InstrumentationLevel::countingPayload:
+    return "counting-payload-detour";
+  }
+  return "direct-site-patch";
+}
+
+uint32_t roundUp(uint32_t value, uint32_t granularity) {
+  return ((value + granularity - 1) / granularity) * granularity;
+}
+
+uint32_t encodeVgprCount(uint32_t pgmRsrc1, uint32_t vgprCount,
+                         uint32_t granularity) {
+  const uint32_t rounded = roundUp(vgprCount, granularity);
+  const uint32_t granulated = (rounded / granularity) - 1;
+  return (pgmRsrc1 & ~0x3fu) | (granulated & 0x3fu);
+}
+
+uint32_t decodeAccumOffset(uint32_t pgmRsrc3) {
+  if (pgmRsrc3 == 0) {
+    return 0;
+  }
+  return ((pgmRsrc3 & 0x3fu) + 1) * 4;
+}
+
+struct CountingScratchPlan {
+  unsigned tempVgprBaseIndex = 0;
+  bool useAgprSpill = false;
+  unsigned agprSpillBaseIndex = 0;
+};
+
+void writeLe32(std::vector<uint8_t> &bytes, uint64_t offset, uint32_t value) {
+  if (offset + 4 > bytes.size()) {
+    return;
+  }
+  for (uint64_t i = 0; i < 4; ++i) {
+    bytes[offset + i] = static_cast<uint8_t>((value >> (i * 8)) & 0xff);
+  }
+}
+
+uint32_t defaultVgprGranularity(const std::string &arch) {
+  if (arch.rfind("gfx90a", 0) == 0 || arch.rfind("gfx940", 0) == 0 ||
+      arch.rfind("gfx942", 0) == 0 || arch.rfind("gfx950", 0) == 0 ||
+      arch.rfind("gfx1250", 0) == 0) {
+    return 8;
+  }
+  return 4;
+}
+
+void applyDescriptorUpdates(RewriteResult &result,
+                            const RewriteOptions &options) {
+  auto &kernel = result.trace.kernel;
+  if (options.instrumentation == InstrumentationLevel::noopPatch ||
+      options.zeroSgprFlavor != ZeroSgprFlavor::withVgprBump ||
+      !kernel.descriptorPresent || kernel.vgprCount == 0) {
+    return;
+  }
+
+  constexpr uint32_t payloadVgprs = 3;
+  constexpr uint32_t accumSpillSlots = 4;
+  const uint32_t oldAccumOffset = decodeAccumOffset(kernel.computePgmRsrc3);
+  const bool hasAccumOffset =
+      oldAccumOffset != 0 && oldAccumOffset <= kernel.vgprCount;
+  const uint32_t granularity =
+      kernel.vgprGranularity == 0 ? defaultVgprGranularity(kernel.arch)
+                                  : kernel.vgprGranularity;
+  const uint32_t requiredExtraVgprs =
+      hasAccumOffset ? accumSpillSlots : payloadVgprs;
+  const uint32_t newVgprCount =
+      roundUp(kernel.vgprCount + requiredExtraVgprs, granularity);
+  const uint32_t newPgmRsrc1 =
+      encodeVgprCount(kernel.computePgmRsrc1, newVgprCount, granularity);
+  if (kernel.descriptorOffset + 52 <= result.patched.bytes.size()) {
+    if (hasAccumOffset) {
+      result.trace.descriptorUpdates.push_back(
+          {"agpr_spill_base", kernel.vgprCount - oldAccumOffset,
+           kernel.vgprCount - oldAccumOffset + accumSpillSlots,
+           "CountingPayload spills borrowed regular VGPRs into new AGPR slots"});
+    }
+    writeLe32(result.patched.bytes, kernel.descriptorOffset + 48, newPgmRsrc1);
+    result.trace.descriptorUpdates.push_back(
+        {"vgpr_count", kernel.vgprCount, newVgprCount,
+         hasAccumOffset
+             ? "ZeroSGPR with VGPR bump reserves AGPR spill slots while "
+               "keeping accum_offset stable"
+             : "ZeroSGPR with VGPR bump reserves payload VGPRs"});
+    result.trace.descriptorUpdates.push_back(
+        {"compute_pgm_rsrc1", kernel.computePgmRsrc1, newPgmRsrc1,
+         "encoded bumped VGPR count"});
+    kernel.vgprCount = newVgprCount;
+    kernel.computePgmRsrc1 = newPgmRsrc1;
+    addInvariant(result.trace, "descriptor-vgpr-bump",
+                 InvariantStatus::passed, kernel.descriptorOffset,
+                 "descriptor VGPR count updated for payload scratch");
+  } else {
+    addInvariant(result.trace, "descriptor-vgpr-bump",
+                 InvariantStatus::failed, kernel.descriptorOffset,
+                 "descriptor offset is outside code object bytes");
+  }
+}
+
+Result<CountingScratchPlan> countingPayloadScratchPlan(
+    const RewriteTrace &trace, const RewriteOptions &options) {
+  if (options.zeroSgprFlavor != ZeroSgprFlavor::withVgprBump) {
+    return Result<CountingScratchPlan>::failure(
+        "CountingPayload currently requires ZeroSGPR with VGPR bump");
+  }
+  uint64_t oldVgprCount = 0;
+  std::optional<uint64_t> agprSpillBase;
+  for (const auto &update : trace.descriptorUpdates) {
+    if (update.field == "agpr_spill_base") {
+      agprSpillBase = update.oldValue;
+    }
+    if (update.field == "vgpr_count") {
+      oldVgprCount = update.oldValue;
+    }
+  }
+  if (oldVgprCount == 0) {
+    return Result<CountingScratchPlan>::failure(
+      "CountingPayload requires descriptor VGPR facts for payload scratch "
+      "registers");
+  }
+  const uint32_t oldAccumOffset = decodeAccumOffset(trace.kernel.computePgmRsrc3);
+  CountingScratchPlan plan;
+  if (oldAccumOffset != 0 && oldAccumOffset <= oldVgprCount) {
+    if (oldAccumOffset < 3 || !agprSpillBase.has_value()) {
+      return Result<CountingScratchPlan>::failure(
+          "CountingPayload requires at least three regular VGPRs below "
+          "accum_offset for AGPR-backed scratch");
+    }
+    plan.tempVgprBaseIndex = static_cast<unsigned>(oldAccumOffset - 3);
+    plan.useAgprSpill = true;
+    plan.agprSpillBaseIndex = static_cast<unsigned>(*agprSpillBase);
+    return Result<CountingScratchPlan>::success(plan);
+  }
+  plan.tempVgprBaseIndex = static_cast<unsigned>(oldVgprCount);
+  return Result<CountingScratchPlan>::success(plan);
+}
+
+Result<std::vector<uint8_t>>
+encodeBranchToTarget(const amdgpu_instr_backend::InstructionBackend &backend,
+                     uint64_t branchPc, uint64_t targetPc) {
+  const auto byteDelta = static_cast<int64_t>(targetPc) -
+                         static_cast<int64_t>(branchPc + 4);
+  if (byteDelta % 4 != 0) {
+    return Result<std::vector<uint8_t>>::failure(
+        "branch target is not dword aligned");
+  }
+  const int64_t dwordDelta = byteDelta / 4;
+  if (dwordDelta < std::numeric_limits<int16_t>::min() ||
+      dwordDelta > std::numeric_limits<int16_t>::max()) {
+    return Result<std::vector<uint8_t>>::failure(
+        "branch target is outside direct s_branch reach");
+  }
+  return backend.encodeSBranch(static_cast<int16_t>(dwordDelta));
+}
+
+Result<std::vector<uint8_t>>
+buildIslandBytes(const amdgpu_instr_backend::InstructionBackend &backend,
+                 const RewriteRequest &request, const RewriteResult &result,
+                 const RewriteSite &site,
+                 const std::vector<uint8_t> &payloadBytes,
+                 uint64_t islandEntryPc) {
+  size_t displacedOffset = 0;
+  if (!addressToOffset(request, site.patchPc, site.overwriteSize,
+                       displacedOffset)) {
+    return Result<std::vector<uint8_t>>::failure(
+        "displaced instruction is outside text");
+  }
+
+  std::vector<uint8_t> island;
+  island.insert(island.end(), payloadBytes.begin(), payloadBytes.end());
+  island.insert(island.end(),
+                result.patched.bytes.begin() +
+                    static_cast<std::ptrdiff_t>(displacedOffset),
+                result.patched.bytes.begin() +
+                    static_cast<std::ptrdiff_t>(displacedOffset +
+                                                site.overwriteSize));
+  const uint64_t branchPc = islandEntryPc + island.size();
+  const uint64_t returnPc = site.patchPc + site.overwriteSize;
+  auto branchBack = encodeBranchToTarget(backend, branchPc, returnPc);
+  if (!branchBack) {
+    return Result<std::vector<uint8_t>>::failure(branchBack.error());
+  }
+  auto branchBytes = branchBack.takeValue();
+  island.insert(island.end(), branchBytes.begin(), branchBytes.end());
+  return Result<std::vector<uint8_t>>::success(std::move(island));
 }
 
 Result<bool> applyBranchPatch(const amdgpu_instr_backend::InstructionBackend &backend,
@@ -187,8 +413,6 @@ Result<RewriteResult> Rewriter::rewrite(const RewriteRequest &request,
 
   if (options.layout != RewriteLayout::singleKernelClone ||
       options.registerMode != RegisterMode::zeroSgpr) {
-    // TODO: Should this be the way it is? Unsupported live instrumentation
-    // modes should be hard failures, not successful results with diagnostics.
     result.diagnostics.push_back(Diagnostic::error(
         DiagnosticCode::unsupportedMode, request.entryPc,
         "new rewrite core supports only SingleKernelClone + ZeroSGPR"));
@@ -198,8 +422,10 @@ Result<RewriteResult> Rewriter::rewrite(const RewriteRequest &request,
   addStage(result.trace, "plan",
            "selected SingleKernelClone + ZeroSGPR with " +
                instrumentationName(options.instrumentation));
-  result.trace.payloads.push_back(
-      {options.instrumentation, instrumentationName(options.instrumentation), 0});
+  PayloadModel baselinePayload;
+  baselinePayload.level = InstrumentationLevel::noopPatch;
+  baselinePayload.description = "NoopPatch baseline branch patch";
+  result.trace.payloads.push_back(std::move(baselinePayload));
 
   std::vector<RewriteSite> rewriteSites = request.sites;
   if (rewriteSites.empty()) {
@@ -228,19 +454,40 @@ Result<RewriteResult> Rewriter::rewrite(const RewriteRequest &request,
   }
 
   if (rewriteSites.empty()) {
-    // TODO: Should this be the way it is? No selected sites is useful as an
-    // artifact-mode warning, but live instrumentation should treat it as hard
-    // failure unless explicitly configured otherwise.
-    result.diagnostics.push_back(Diagnostic::warning(
-        DiagnosticCode::invalidRequest, parsed.kernel.entryPc,
-        "site analysis selected no patchable sites"));
-    addInvariant(result.trace, "selected-site-coverage",
-                 InvariantStatus::failed, parsed.kernel.entryPc,
-                 "no patchable sites selected");
+    if (options.instrumentation == InstrumentationLevel::noopPatch) {
+      addInvariant(result.trace, "noopatch-preserves-bytes",
+                   InvariantStatus::passed, parsed.kernel.entryPc,
+                   "NoopPatch does not mutate kernel text");
+    } else {
+      result.diagnostics.push_back(Diagnostic::warning(
+          DiagnosticCode::invalidRequest, parsed.kernel.entryPc,
+          "site analysis selected no patchable sites"));
+      addInvariant(result.trace, "selected-site-coverage",
+                   InvariantStatus::failed, parsed.kernel.entryPc,
+                   "no patchable sites selected");
+    }
   } else {
     addInvariant(result.trace, "selected-site-coverage",
                  InvariantStatus::passed, parsed.kernel.entryPc,
                  "at least one patchable site selected");
+  }
+
+  if (options.instrumentation == InstrumentationLevel::noopPatch) {
+    addStage(result.trace, "emit",
+             "NoopPatch preserved code object bytes without patching sites");
+    addStage(result.trace, "validate",
+             "recorded parse and site-analysis facts for live redirection");
+    return Result<RewriteResult>::success(std::move(result));
+  }
+
+  applyDescriptorUpdates(result, options);
+  CountingScratchPlan countingScratchPlan;
+  if (options.instrumentation == InstrumentationLevel::countingPayload) {
+    auto scratchPlan = countingPayloadScratchPlan(result.trace, options);
+    if (!scratchPlan) {
+      return Result<RewriteResult>::failure(scratchPlan.error());
+    }
+    countingScratchPlan = scratchPlan.takeValue();
   }
 
   for (const auto &site : rewriteSites) {
@@ -253,10 +500,69 @@ Result<RewriteResult> Rewriter::rewrite(const RewriteRequest &request,
     siteModel.decision = "selected";
     result.trace.plan.selectedSites.push_back(siteModel);
 
+    uint64_t patchTargetPc = site.targetPc;
+    if (options.instrumentation != InstrumentationLevel::noopPatch) {
+      const uint64_t payloadEntryPc =
+          (result.trace.kernel.textSectionBase == 0
+               ? effectiveRequest.textBase
+               : result.trace.kernel.textSectionBase) +
+          (result.trace.kernel.textSectionSize == 0
+               ? textSize(effectiveRequest)
+               : result.trace.kernel.textSectionSize);
+      PayloadEmissionRequest payloadRequest;
+      payloadRequest.level = options.instrumentation;
+      payloadRequest.siteId = site.id;
+      payloadRequest.entryPc = payloadEntryPc;
+      payloadRequest.returnPc = site.targetPc;
+      payloadRequest.profilingBufferAddress =
+          effectiveRequest.profilingBufferAddress;
+      payloadRequest.profilingBufferSize = effectiveRequest.profilingBufferSize;
+      payloadRequest.tempVgprBaseIndex =
+          countingScratchPlan.tempVgprBaseIndex;
+      payloadRequest.useAgprSpill = countingScratchPlan.useAgprSpill;
+      payloadRequest.agprSpillBaseIndex =
+          countingScratchPlan.agprSpillBaseIndex;
+      auto payload = emitPayload(backend, payloadRequest);
+      if (!payload) {
+        return Result<RewriteResult>::failure(payload.error());
+      }
+      auto emission = payload.takeValue();
+      auto island = buildIslandBytes(backend, effectiveRequest, result, site,
+                                     emission.bytes, payloadEntryPc);
+      if (!island) {
+        return Result<RewriteResult>::failure(island.error());
+      }
+      auto islandBytes = island.takeValue();
+      uint64_t appendedEntryPc = 0;
+      std::string appendError;
+      if (!appendTextBytes(result, effectiveRequest, islandBytes,
+                           appendedEntryPc, appendError)) {
+        return Result<RewriteResult>::failure(appendError);
+      }
+      emission.entryPc = appendedEntryPc;
+      patchTargetPc = emission.entryPc;
+      PayloadModel payloadModel;
+      payloadModel.level = options.instrumentation;
+      payloadModel.description = emission.description;
+      payloadModel.byteSize = static_cast<uint64_t>(emission.bytes.size());
+      payloadModel.bytes = emission.bytes;
+      if (options.instrumentation == InstrumentationLevel::countingPayload) {
+        payloadModel.profilingBufferAddress =
+            effectiveRequest.profilingBufferAddress;
+        payloadModel.profilingRecordSize = countingPayloadRecordV1Size;
+        payloadModel.abi = "CountingPayloadRecordV1:baked-buffer-address";
+      }
+      result.trace.payloads.push_back(std::move(payloadModel));
+      result.trace.trampolines.push_back(
+          {site.id, emission.entryPc, emission.returnPc,
+           static_cast<uint64_t>(islandBytes.size()), emission.description,
+           islandBytes});
+    }
+
     const DaisyChainRoute *route = findRoute(effectiveRequest, site.id);
     if (route && options.enableDaisyChaining && !route->cellPcs.empty()) {
       std::vector<uint64_t> chain = route->cellPcs;
-      result.trace.daisyChains.push_back({site.id, chain, site.targetPc});
+      result.trace.daisyChains.push_back({site.id, chain, patchTargetPc});
       auto first = applyBranchPatch(backend, effectiveRequest, result, site.id,
                                     site.patchPc, chain.front(),
                                     site.overwriteSize,
@@ -265,7 +571,7 @@ Result<RewriteResult> Rewriter::rewrite(const RewriteRequest &request,
         return Result<RewriteResult>::failure(first.error());
       }
       for (size_t i = 0; i < chain.size(); ++i) {
-        uint64_t target = (i + 1 < chain.size()) ? chain[i + 1] : site.targetPc;
+        uint64_t target = (i + 1 < chain.size()) ? chain[i + 1] : patchTargetPc;
         auto cell = applyBranchPatch(backend, effectiveRequest, result, site.id,
                                      chain[i], target, 4,
                                      "daisy-chain-cell");
@@ -277,8 +583,9 @@ Result<RewriteResult> Rewriter::rewrite(const RewriteRequest &request,
     }
 
     auto direct = applyBranchPatch(backend, effectiveRequest, result, site.id,
-                                   site.patchPc, site.targetPc,
-                                   site.overwriteSize, "direct-site-patch");
+                                   site.patchPc, patchTargetPc,
+                                   site.overwriteSize,
+                                   patchReason(options.instrumentation));
     if (!direct) {
       return Result<RewriteResult>::failure(direct.error());
     }

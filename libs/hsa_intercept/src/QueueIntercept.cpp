@@ -107,6 +107,12 @@ Status registerQueueIntercept(QueueHandle queue) {
 extern "C" {
 
 hsa_status_t hsa_init() {
+  // #region agent log
+  aegis::hsa_intercept::detail::debugLog(
+      "QueueIntercept.cpp:hsa_init:entry", "hsa_init entered", "H2",
+      std::string("{\"installed\":") +
+          (aegis::hsa_intercept::isInstalled() ? "true" : "false") + "}");
+  // #endregion
   auto realFn = aegis::hsa_intercept::detail::realHsaInit();
   if (!realFn) {
     return HSA_STATUS_ERROR;
@@ -120,6 +126,13 @@ hsa_status_t hsa_init() {
       aegis::hsa_intercept::detail::log(installStatus.message());
     }
   }
+  // #region agent log
+  aegis::hsa_intercept::detail::debugLog(
+      "QueueIntercept.cpp:hsa_init:exit", "hsa_init exited", "H2",
+      std::string("{\"status\":") + std::to_string(static_cast<int>(status)) +
+          ",\"installed\":" +
+          (aegis::hsa_intercept::isInstalled() ? "true" : "false") + "}");
+  // #endregion
   return status;
 }
 
@@ -148,6 +161,17 @@ hsa_status_t hsa_queue_create(
         s.queueInterceptRegisterFn);
   }
 
+  // #region agent log
+  aegis::hsa_intercept::detail::debugLog(
+      "QueueIntercept.cpp:hsa_queue_create:path", "hsa_queue_create path",
+      "H3,H5",
+      std::string("{\"enabled\":") + (enabled ? "true" : "false") +
+          ",\"installed\":" + (s.installed.load() ? "true" : "false") +
+          ",\"apiTableReady\":" + (s.apiTableReady.load() ? "true" : "false") +
+          ",\"hasCreateFn\":" + (createFn ? "true" : "false") +
+          ",\"hasRegisterFn\":" + (registerFn ? "true" : "false") + "}");
+  // #endregion
+
   if (!enabled || !s.installed.load() || !s.apiTableReady.load() || !createFn ||
       !registerFn) {
     return realFn(agent, size, type, callback, data, privateSegmentSize,
@@ -172,6 +196,7 @@ hsa_status_t hsa_queue_create(
   } else {
     std::lock_guard<std::mutex> lock(s.mutex);
     s.trackedQueues.push_back(static_cast<void*>(*queue));
+    s.queueAgents[static_cast<void*>(*queue)] = agent.handle;
   }
 
   return HSA_STATUS_SUCCESS;

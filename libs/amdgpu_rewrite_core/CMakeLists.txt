@@ -1,5 +1,7 @@
 add_library(amdgpu_rewrite_core STATIC
+  src/CodeObjectMutation.cpp
   src/CodeObjectModel.cpp
+  src/PayloadEmitter.cpp
   src/RewriteCore.cpp
   src/SiteAnalysis.cpp
 )

@@ -24,6 +24,15 @@ struct DescriptorFacts {
   uint64_t fileOffset = 0;
   uint64_t address = 0;
   uint64_t size = 0;
+  uint32_t groupSegmentFixedSize = 0;
+  uint32_t privateSegmentFixedSize = 0;
+  uint32_t kernargSize = 0;
+  uint32_t computePgmRsrc3 = 0;
+  uint32_t computePgmRsrc1 = 0;
+  uint32_t computePgmRsrc2 = 0;
+  uint32_t vgprCount = 0;
+  uint32_t sgprCount = 0;
+  uint32_t vgprGranularity = 0;
 };
 
 struct ParsedKernelCode {

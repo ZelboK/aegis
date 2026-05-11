@@ -18,8 +18,23 @@ struct KernelModel {
   uint64_t entryPc = 0;
   ByteRange textRange;
   uint64_t textOffset = 0;
+  uint64_t textSectionBase = 0;
+  uint64_t textSectionOffset = 0;
+  uint64_t textSectionSize = 0;
   std::string metadataSource;
   std::string originalBytesHash;
+  bool descriptorPresent = false;
+  uint64_t descriptorOffset = 0;
+  uint64_t descriptorSize = 0;
+  uint32_t kernargSize = 0;
+  uint32_t groupSegmentFixedSize = 0;
+  uint32_t privateSegmentFixedSize = 0;
+  uint32_t computePgmRsrc1 = 0;
+  uint32_t computePgmRsrc2 = 0;
+  uint32_t computePgmRsrc3 = 0;
+  uint32_t vgprCount = 0;
+  uint32_t sgprCount = 0;
+  uint32_t vgprGranularity = 0;
 };
 
 struct SiteModel {
@@ -35,6 +50,10 @@ struct PayloadModel {
   InstrumentationLevel level = InstrumentationLevel::noopPatch;
   std::string description;
   uint64_t byteSize = 0;
+  uint64_t profilingBufferAddress = 0;
+  uint64_t profilingRecordSize = 0;
+  std::string abi;
+  std::vector<uint8_t> bytes;
 };
 
 struct TrampolineModel {
@@ -43,6 +62,7 @@ struct TrampolineModel {
   uint64_t returnPc = 0;
   uint64_t byteSize = 0;
   std::string description;
+  std::vector<uint8_t> bytes;
 };
 
 struct DaisyChainModel {

@@ -12,6 +12,16 @@
 
 namespace aegisbit_output {
 
+struct ProfilingRecord {
+  std::string profileMode;
+  std::string abi;
+  uint64_t bufferAddress = 0;
+  uint64_t siteId = 0;
+  uint64_t hitCount = 0;
+  std::string status;
+  std::string note;
+};
+
 struct DispatchTrace {
   uint64_t dispatchId = 0;
   std::string rewriteId;
@@ -20,8 +30,10 @@ struct DispatchTrace {
   uint64_t originalKernargAddress = 0;
   uint64_t patchedKernargAddress = 0;
   uint64_t completionSignal = 0;
+  uint64_t profilingRecordCount = 0;
   std::string status;
   std::string note;
+  std::vector<ProfilingRecord> profilingRecords;
 };
 
 struct BundleFile {
@@ -40,6 +52,9 @@ renderRewriteSummary(const amdgpu_rewrite_core::RewriteTrace &trace);
 renderRewriteTraceJson(const amdgpu_rewrite_core::RewriteTrace &trace);
 
 [[nodiscard]] std::string renderDispatchTraceJson(const DispatchTrace &trace);
+
+[[nodiscard]] std::string
+renderProfilingRecordsJson(const std::vector<DispatchTrace> &dispatches);
 
 [[nodiscard]] ReproducerBundle
 buildReproducerBundle(const amdgpu_rewrite_core::RewriteResult &rewrite,

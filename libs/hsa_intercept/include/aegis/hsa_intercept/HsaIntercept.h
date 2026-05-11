@@ -58,6 +58,7 @@ struct Callbacks {
   std::function<void(const CapturedCodeObject&)> onCodeObject;
   std::function<void(const CapturedKernelSymbol&)> onKernelSymbol;
   std::function<DispatchDecision(DispatchEvent&)> onDispatch;
+  std::function<void(const DispatchEvent&)> onDispatchSubmitted;
   std::function<void(const std::string&)> log;
 };
 

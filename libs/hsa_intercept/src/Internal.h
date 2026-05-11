@@ -48,6 +48,7 @@ struct State {
 
   std::mutex mutex;
   std::vector<QueueHandle> trackedQueues;
+  std::unordered_map<QueueHandle, uint64_t> queueAgents;
   std::unordered_map<uint64_t, CapturedCodeObject> codeObjects;
 
   void* queueInterceptCreateFn = nullptr;
@@ -60,6 +61,8 @@ State& state();
 
 void log(std::string message);
 Status makeStatus(StatusCode code, std::string message);
+void debugLog(const char* location, const char* message,
+              const char* hypothesisId, const std::string& data);
 
 Status captureApiTable(void* tablePtr);
 void captureExecutableState(uint64_t executableHandle);

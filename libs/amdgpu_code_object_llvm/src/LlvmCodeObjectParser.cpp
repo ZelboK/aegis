@@ -68,6 +68,17 @@ bool namesMatchKernel(const std::string &symbolName, const std::string &kernelNa
          stripDescriptorSuffix(symbolName) == stripDescriptorSuffix(kernelName);
 }
 
+uint32_t readLe32(const std::vector<uint8_t> &bytes, uint64_t offset) {
+  if (offset + 4 > bytes.size()) {
+    return 0;
+  }
+  uint32_t value = 0;
+  for (uint64_t i = 0; i < 4; ++i) {
+    value |= static_cast<uint32_t>(bytes[offset + i]) << (i * 8);
+  }
+  return value;
+}
+
 std::string getGPUArch(uint32_t flags) {
   switch (flags & 0xffu) {
   case 0x02c:
@@ -99,6 +110,23 @@ std::string getGPUArch(uint32_t flags) {
   default:
     return "unknown";
   }
+}
+
+uint32_t vgprGranularityForArch(llvm::StringRef arch) {
+  if (arch.starts_with("gfx90a") || arch.starts_with("gfx940") ||
+      arch.starts_with("gfx942") || arch.starts_with("gfx950") ||
+      arch.starts_with("gfx1250")) {
+    return 8;
+  }
+  return 4;
+}
+
+uint32_t extractVgprCount(uint32_t pgmRsrc1, uint32_t granularity) {
+  return ((pgmRsrc1 & 0x3fu) + 1) * granularity;
+}
+
+uint32_t extractSgprCount(uint32_t pgmRsrc1) {
+  return (((pgmRsrc1 >> 6) & 0x0fu) + 1) * 8;
 }
 
 Result<SectionFacts> getSectionFacts(const ELFObjectFile<ELF64LE> &elf,
@@ -351,6 +379,19 @@ public:
         facts.fileOffset =
             descriptorSection->fileOffset +
             (descriptor->value - descriptorSection->address);
+      }
+      if (facts.fileOffset + 64 <= request.bytes.size()) {
+        facts.groupSegmentFixedSize = readLe32(request.bytes, facts.fileOffset);
+        facts.privateSegmentFixedSize =
+            readLe32(request.bytes, facts.fileOffset + 4);
+        facts.kernargSize = readLe32(request.bytes, facts.fileOffset + 8);
+        facts.computePgmRsrc3 = readLe32(request.bytes, facts.fileOffset + 44);
+        facts.computePgmRsrc1 = readLe32(request.bytes, facts.fileOffset + 48);
+        facts.computePgmRsrc2 = readLe32(request.bytes, facts.fileOffset + 52);
+        facts.vgprGranularity = vgprGranularityForArch(parsed.arch);
+        facts.vgprCount =
+            extractVgprCount(facts.computePgmRsrc1, facts.vgprGranularity);
+        facts.sgprCount = extractSgprCount(facts.computePgmRsrc1);
       }
       parsed.descriptor = facts;
     }

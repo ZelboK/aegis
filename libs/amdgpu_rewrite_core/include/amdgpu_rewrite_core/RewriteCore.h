@@ -36,6 +36,8 @@ struct RewriteRequest {
   uint64_t textBase = 0;
   uint64_t textOffset = 0;
   uint64_t textSize = 0;
+  uint64_t profilingBufferAddress = 0;
+  uint64_t profilingBufferSize = 0;
   std::vector<uint8_t> codeObjectBytes;
   const amdgpu_code_object::CodeObjectParser *codeObjectParser = nullptr;
   std::vector<RewriteSite> sites;

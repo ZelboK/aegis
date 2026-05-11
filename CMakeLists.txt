@@ -91,4 +91,24 @@ add_subdirectory(libs/aegisbit_runtime)
 
 if(NEW_AEGIS_BUILD_PRELOAD AND AEGIS_HAS_HSA_INTERCEPT)
   add_subdirectory(apps/preload)
+  if(NEW_AEGIS_BUILD_TESTS)
+    set(_aegis_live_smoke "${CMAKE_CURRENT_SOURCE_DIR}/apps/profiling_smoke/live_profiling_smoke.sh")
+    foreach(_mode IN ITEMS noopatch dry counting)
+      add_test(NAME new_aegis_live_${_mode}_smoke
+        COMMAND "${_aegis_live_smoke}" --build-and-run)
+      set_tests_properties(new_aegis_live_${_mode}_smoke PROPERTIES
+        ENVIRONMENT "AEGIS_CTEST_LIVE_SMOKE=1;AEGIS_PRELOAD_LIB=$<TARGET_FILE:aegis_preload>;AEGIS_INSTRUMENTATION=${_mode}"
+        SKIP_RETURN_CODE 77)
+    endforeach()
+    foreach(_profile IN ITEMS vmem_coalescing lds_bank_conflicts)
+      add_test(NAME new_aegis_${_profile}_smoke
+        COMMAND "${CMAKE_COMMAND}" -E env
+          "AEGIS_CTEST_LIVE_SMOKE=1"
+          "AEGIS_PROFILE_REQUIREMENT=${_profile}"
+          "${_aegis_live_smoke}" --build-and-run)
+      set_tests_properties(new_aegis_${_profile}_smoke PROPERTIES
+        ENVIRONMENT "AEGIS_PRELOAD_LIB=$<TARGET_FILE:aegis_preload>;AEGIS_INSTRUMENTATION=counting"
+        SKIP_RETURN_CODE 77)
+    endforeach()
+  endif()
 endif()

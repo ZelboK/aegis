@@ -36,15 +36,19 @@ struct DispatchPacket {
   uint16_t header = 0;
   uint64_t kernelObject = 0;
   uint64_t kernargAddress = 0;
+  uint64_t completionSignal = 0;
 };
 
 /// Event emitted for a kernel dispatch packet observed at queue write time.
 struct DispatchEvent {
   QueueHandle queue = nullptr;
+  uint64_t queueAgent = 0;
   DispatchPacket packet;
   uint64_t originalKernelObject = 0;
   uint64_t originalKernargAddress = 0;
   uint32_t originalKernargSize = 0;
+  uint64_t completionSignal = 0;
+  uint64_t correlationId = 0;
 };
 
 } // namespace aegis::hsa_intercept

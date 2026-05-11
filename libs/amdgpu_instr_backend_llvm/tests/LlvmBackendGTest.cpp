@@ -19,6 +19,7 @@ namespace {
 using amdgpu_instr_backend::Instruction;
 using amdgpu_instr_backend::InstructionBackend;
 using amdgpu_instr_backend::Operand;
+using amdgpu_instr_backend::CountingRecordWrite;
 
 std::string readFile(const std::filesystem::path &Path) {
   std::ifstream Input(Path);
@@ -236,6 +237,78 @@ TEST_F(LlvmBackendRelocTest, RelocationSessionSupportsRepeatedCopies) {
     ASSERT_FALSE(Relocated.value().hasErrors());
     EXPECT_EQ(Relocated.value().Records.size(), 64u);
   }
+}
+
+TEST_F(LlvmBackendRelocTest, EmitsCountingRecordWriteSequence) {
+  CountingRecordWrite Request;
+  Request.bufferAddress = 0x100000;
+  Request.bufferSize = 24;
+  Request.siteId = 7;
+  Request.value = 1;
+  Request.addressVgprIndex = 8;
+  Request.saveVgprIndex = 9;
+  Request.dataVgprIndex = 10;
+
+  auto Bytes = Backend->encodeCountingRecordWrite(Request);
+  ASSERT_TRUE(Bytes) << Bytes.error();
+  ASSERT_FALSE(Bytes.value().empty());
+
+  auto Insts = Backend->decodeAll(Bytes.value(), 0x8000);
+  ASSERT_TRUE(Insts) << Insts.error();
+  ASSERT_GE(Insts.value().size(), 8u);
+  bool SawGlobalStore = false;
+  for (const auto &Inst : Insts.value()) {
+    if (Inst.MayStore && Inst.Memory == Instruction::MemoryKind::global) {
+      SawGlobalStore = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(SawGlobalStore);
+}
+
+TEST_F(LlvmBackendRelocTest, EmitsCountingRecordWriteWithAgprSpill) {
+  CountingRecordWrite Request;
+  Request.bufferAddress = 0x100000;
+  Request.bufferSize = 24;
+  Request.siteId = 7;
+  Request.value = 1;
+  Request.addressVgprIndex = 5;
+  Request.saveVgprIndex = 6;
+  Request.dataVgprIndex = 7;
+  Request.useAgprSpill = true;
+  Request.agprSpillBaseIndex = 0;
+
+  auto Bytes = Backend->encodeCountingRecordWrite(Request);
+  ASSERT_TRUE(Bytes) << Bytes.error();
+  ASSERT_FALSE(Bytes.value().empty());
+
+  auto Insts = Backend->decodeAll(Bytes.value(), 0x8000);
+  ASSERT_TRUE(Insts) << Insts.error();
+  bool SawAccWrite = false;
+  bool SawAccRead = false;
+  for (const auto &Inst : Insts.value()) {
+    if (Inst.Mnemonic == "v_accvgpr_write_b32") {
+      SawAccWrite = true;
+    }
+    if (Inst.Mnemonic == "v_accvgpr_read_b32") {
+      SawAccRead = true;
+    }
+  }
+  EXPECT_TRUE(SawAccWrite);
+  EXPECT_TRUE(SawAccRead);
+}
+
+TEST_F(LlvmBackendRelocTest, RejectsCountingRecordWriteWithoutBuffer) {
+  CountingRecordWrite Request;
+  Request.bufferAddress = 0;
+  Request.bufferSize = 24;
+  Request.addressVgprIndex = 8;
+  Request.saveVgprIndex = 9;
+  Request.dataVgprIndex = 10;
+
+  auto Bytes = Backend->encodeCountingRecordWrite(Request);
+  ASSERT_FALSE(Bytes);
+  EXPECT_NE(Bytes.error().find("valid profiling buffer"), std::string::npos);
 }
 
 TEST(AmdgpuInstrBackendLlvmBoundaryTest, PublicHeadersAvoidLlvmTypes) {

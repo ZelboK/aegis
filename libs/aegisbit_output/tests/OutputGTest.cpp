@@ -36,6 +36,7 @@ TEST(AegisbitOutputTest, BuildsReproducerBundle) {
   dispatch.dispatchId = 42;
   dispatch.rewriteId = "rewrite";
   dispatch.status = "observed";
+  dispatch.profilingRecordCount = 7;
 
   auto bundle = aegisbit_output::buildReproducerBundle(rewrite, {dispatch});
   ASSERT_EQ(bundle.files.size(), 4u);
@@ -43,6 +44,10 @@ TEST(AegisbitOutputTest, BuildsReproducerBundle) {
   EXPECT_EQ(bundle.files[1].name, "rewrite_summary.txt");
   EXPECT_EQ(bundle.files[2].name, "rewrite_trace.json");
   EXPECT_EQ(bundle.files[3].name, "dispatch_0.json");
+  std::string dispatchJson(bundle.files[3].bytes.begin(),
+                           bundle.files[3].bytes.end());
+  EXPECT_NE(dispatchJson.find("\"profilingRecordCount\":7"),
+            std::string::npos);
 }
 
 TEST(AegisbitOutputTest, BuildsReproducerBundleWithOriginalBytes) {
@@ -60,4 +65,27 @@ TEST(AegisbitOutputTest, BuildsReproducerBundleWithOriginalBytes) {
   EXPECT_EQ(bundle.files[0].name, "original_code_object.bin");
   EXPECT_EQ(bundle.files[0].bytes, std::vector<uint8_t>({1, 2, 3}));
   EXPECT_EQ(bundle.files[1].name, "patched_code_object.bin");
+}
+
+TEST(AegisbitOutputTest, RendersProfilingRecordsInDispatchAndBundle) {
+  amdgpu_rewrite_core::RewriteResult rewrite;
+  rewrite.patched.bytes = {1};
+  rewrite.trace.rewriteId = "rewrite";
+  aegisbit_output::DispatchTrace dispatch;
+  dispatch.dispatchId = 7;
+  dispatch.rewriteId = "rewrite";
+  dispatch.status = "loaded-patched-kernel";
+  dispatch.profilingRecordCount = 3;
+  dispatch.profilingRecords.push_back(
+      {"CountingPayload", "CountingPayloadRecordV1", 0x1000, 9, 3, "read",
+       "ok"});
+
+  auto json = aegisbit_output::renderDispatchTraceJson(dispatch);
+  EXPECT_NE(json.find("\"profilingRecords\""), std::string::npos);
+  EXPECT_NE(json.find("\"siteId\":9"), std::string::npos);
+  EXPECT_NE(json.find("\"hitCount\":3"), std::string::npos);
+
+  auto bundle = aegisbit_output::buildReproducerBundle(rewrite, {dispatch});
+  ASSERT_EQ(bundle.files.size(), 5u);
+  EXPECT_EQ(bundle.files[4].name, "profiling_records.json");
 }

@@ -8,6 +8,30 @@
 #include <utility>
 
 namespace amdgpu_rewrite_core {
+namespace {
+
+SiteKind siteKindFromInstruction(
+    amdgpu_instr_backend::Instruction::MemoryKind memory) {
+  switch (memory) {
+  case amdgpu_instr_backend::Instruction::MemoryKind::global:
+    return SiteKind::globalMemory;
+  case amdgpu_instr_backend::Instruction::MemoryKind::lds:
+    return SiteKind::ldsMemory;
+  case amdgpu_instr_backend::Instruction::MemoryKind::none:
+  case amdgpu_instr_backend::Instruction::MemoryKind::other:
+    return SiteKind::unknown;
+  }
+  return SiteKind::unknown;
+}
+
+bool isSupportedMemorySite(const amdgpu_instr_backend::Instruction &inst) {
+  return (inst.Memory == amdgpu_instr_backend::Instruction::MemoryKind::global ||
+          inst.Memory == amdgpu_instr_backend::Instruction::MemoryKind::lds) &&
+         (inst.MayLoad || inst.MayStore) && !inst.IsTerminator &&
+         !inst.IsPCRelativeBranch && inst.Size != 0;
+}
+
+} // namespace
 
 amdgpu_instr_backend::Result<SiteAnalysisResult>
 analyzeSites(const ParsedCodeObject &codeObject,
@@ -42,25 +66,27 @@ analyzeSites(const ParsedCodeObject &codeObject,
     model.id = nextSiteId;
     model.pc = inst.Address;
     model.overwriteSize = inst.Size;
-    model.kind = SiteKind::unknown;
+    model.kind = siteKindFromInstruction(inst.Memory);
 
-    if (!inst.IsPCRelativeBranch) {
-      model.decision = "rejected: not a PC-relative branch candidate";
+    if (!isSupportedMemorySite(inst)) {
+      if (inst.IsPCRelativeBranch || inst.IsTerminator) {
+        model.decision = "rejected: control-flow is not a profiling site";
+      } else if (inst.Memory == amdgpu_instr_backend::Instruction::MemoryKind::none) {
+        model.decision = "rejected: not a memory instruction";
+      } else if (inst.Memory == amdgpu_instr_backend::Instruction::MemoryKind::other) {
+        model.decision = "rejected: unsupported memory instruction kind";
+      } else {
+        model.decision = "rejected: unsupported memory-site shape";
+      }
       result.siteModels.push_back(std::move(model));
       continue;
     }
 
-    auto target = backend.branchTarget(inst, inst.Address);
-    if (!target) {
-      model.decision = "rejected: branch target unavailable";
-      result.siteModels.push_back(std::move(model));
-      continue;
-    }
-
-    model.targetPc = target.value();
-    model.decision = "selected: PC-relative branch candidate";
+    model.targetPc = inst.Address + inst.Size;
+    model.decision = "selected: supported memory instruction";
     result.rewriteSites.push_back(
-        {nextSiteId, inst.Address, target.value(), inst.Size, SiteKind::unknown});
+        {nextSiteId, inst.Address, inst.Address + inst.Size, inst.Size,
+         model.kind});
     result.siteModels.push_back(std::move(model));
     ++nextSiteId;
   }

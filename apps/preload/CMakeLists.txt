@@ -23,6 +23,7 @@ endif()
 target_link_libraries(aegis_preload
   PRIVATE
     aegisbit_runtime
+    hsa_kernel_loader_hsa
     ${HSA_RUNTIME_LIBRARY}
     dl
 )

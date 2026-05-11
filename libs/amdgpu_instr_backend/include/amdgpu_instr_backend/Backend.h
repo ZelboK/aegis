@@ -8,6 +8,7 @@
 #include "amdgpu_instr_backend/Result.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace amdgpu_instr_backend {
@@ -31,6 +32,12 @@ public:
   encodeSBranch(int16_t DwordOffset) const = 0;
 
   [[nodiscard]] virtual Result<std::vector<uint8_t>> encodeNop() const = 0;
+
+  [[nodiscard]] virtual Result<std::vector<uint8_t>>
+  encodeCountingRecordWrite(const CountingRecordWrite &) const {
+    return Result<std::vector<uint8_t>>::failure(
+        "counting record write encoding is not implemented by this backend");
+  }
 
   [[nodiscard]] virtual Result<uint64_t>
   branchTarget(const Instruction &Inst, uint64_t CurrentPC) const = 0;

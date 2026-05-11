@@ -4,6 +4,7 @@
 #define AMDGPU_INSTR_BACKEND_INSTRUCTION_H
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace amdgpu_instr_backend {
@@ -47,6 +48,18 @@ struct Instruction {
   uint64_t Address = 0;
   uint64_t Size = 0;
   bool IsPCRelativeBranch = false;
+  bool MayLoad = false;
+  bool MayStore = false;
+  bool IsTerminator = false;
+  std::string Mnemonic;
+  enum class MemoryKind {
+    none,
+    global,
+    lds,
+    other,
+  };
+  MemoryKind Memory = MemoryKind::none;
+  std::vector<unsigned> AddressRegisters;
   std::vector<Operand> Operands;
 };
 
@@ -63,6 +76,18 @@ struct SgprPairInfo {
   unsigned LoReg = 0;
   unsigned HiReg = 0;
   unsigned LoIndex = 0;
+};
+
+struct CountingRecordWrite {
+  uint64_t bufferAddress = 0;
+  uint64_t bufferSize = 0;
+  uint64_t siteId = 0;
+  uint64_t value = 1;
+  unsigned addressVgprIndex = 0;
+  unsigned saveVgprIndex = 0;
+  unsigned dataVgprIndex = 0;
+  bool useAgprSpill = false;
+  unsigned agprSpillBaseIndex = 0;
 };
 
 } // namespace amdgpu_instr_backend

@@ -42,14 +42,31 @@ parseCodeObject(const CodeObjectParseRequest &request) {
     parsed.kernel.entryPc = kernel.entryPc;
     parsed.kernel.textRange = {kernel.textBase, kernel.textBase + kernel.textSize};
     parsed.kernel.textOffset = kernel.textOffset;
+    parsed.kernel.textSectionBase = kernel.textSection.address;
+    parsed.kernel.textSectionOffset = kernel.textSection.fileOffset;
+    parsed.kernel.textSectionSize = kernel.textSection.size;
     parsed.kernel.metadataSource = "parser";
     parsed.kernel.originalBytesHash = hashBytes(request.bytes);
+    if (kernel.descriptor) {
+      parsed.kernel.descriptorPresent = kernel.descriptor->present;
+      parsed.kernel.descriptorOffset = kernel.descriptor->fileOffset;
+      parsed.kernel.descriptorSize = kernel.descriptor->size;
+      parsed.kernel.kernargSize = kernel.descriptor->kernargSize;
+      parsed.kernel.groupSegmentFixedSize =
+          kernel.descriptor->groupSegmentFixedSize;
+      parsed.kernel.privateSegmentFixedSize =
+          kernel.descriptor->privateSegmentFixedSize;
+      parsed.kernel.computePgmRsrc1 = kernel.descriptor->computePgmRsrc1;
+      parsed.kernel.computePgmRsrc2 = kernel.descriptor->computePgmRsrc2;
+      parsed.kernel.computePgmRsrc3 = kernel.descriptor->computePgmRsrc3;
+      parsed.kernel.vgprCount = kernel.descriptor->vgprCount;
+      parsed.kernel.sgprCount = kernel.descriptor->sgprCount;
+      parsed.kernel.vgprGranularity = kernel.descriptor->vgprGranularity;
+    }
     return amdgpu_instr_backend::Result<ParsedCodeObject>::success(
         std::move(parsed));
   }
 
-  // TODO: Should this be the way it is? Caller-provided metadata is useful for
-  // no-LLVM tests, but live instrumentation should require parser-derived facts.
   if (request.textOffset > request.bytes.size()) {
     return amdgpu_instr_backend::Result<ParsedCodeObject>::failure(
         "text offset is outside code object bytes");
@@ -71,6 +88,9 @@ parseCodeObject(const CodeObjectParseRequest &request) {
   parsed.kernel.entryPc = request.entryPc;
   parsed.kernel.textRange = {request.textBase, request.textBase + textSize};
   parsed.kernel.textOffset = request.textOffset;
+  parsed.kernel.textSectionBase = request.textBase;
+  parsed.kernel.textSectionOffset = request.textOffset;
+  parsed.kernel.textSectionSize = textSize;
   parsed.kernel.metadataSource = "request";
   parsed.kernel.originalBytesHash = hashBytes(request.bytes);
 

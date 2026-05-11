@@ -2,6 +2,8 @@
 
 #include "Internal.h"
 
+#include <chrono>
+#include <fstream>
 #include <utility>
 
 namespace aegis::hsa_intercept {
@@ -39,10 +41,27 @@ void log(std::string message) {
   }
 }
 
+void debugLog(const char* location, const char* message,
+              const char* hypothesisId, const std::string& data) {
+  std::ofstream out("/home/djavady/aegis_three/.cursor/debug-748d53.log",
+                    std::ios::app);
+  if (!out) {
+    return;
+  }
+  const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+  out << "{\"sessionId\":\"748d53\",\"runId\":\"initial\",\"hypothesisId\":\""
+      << hypothesisId << "\",\"location\":\"" << location
+      << "\",\"message\":\"" << message << "\",\"data\":" << data
+      << ",\"timestamp\":" << timestamp << "}\n";
+}
+
 void resetCapturedState() {
   auto& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
   s.trackedQueues.clear();
+  s.queueAgents.clear();
   s.codeObjects.clear();
 }
 
@@ -92,6 +111,7 @@ void uninstall() {
     std::lock_guard<std::mutex> lock(s.mutex);
     s.callbacks = {};
     s.trackedQueues.clear();
+    s.queueAgents.clear();
     s.codeObjects.clear();
     s.queueInterceptCreateFn = nullptr;
     s.queueInterceptRegisterFn = nullptr;
@@ -178,13 +198,30 @@ void handlePacketWrite(const void* packets, uint64_t packetCount,
     }
 
     auto modifiedPacket = packet;
+    // #region agent log
+    detail::debugLog(
+        "HsaIntercept.cpp:handlePacketWrite:before-callback",
+        "kernel dispatch packet before runtime callback", "H4,H5",
+        std::string("{\"kernelObject\":") +
+            std::to_string(packet.kernelObject) + ",\"kernargAddress\":" +
+            std::to_string(packet.kernargAddress) + "}");
+    // #endregion
     DispatchEvent event;
     event.queue = queue;
+    {
+      std::lock_guard<std::mutex> lock(detail::state().mutex);
+      auto agentIt = detail::state().queueAgents.find(queue);
+      if (agentIt != detail::state().queueAgents.end()) {
+        event.queueAgent = agentIt->second;
+      }
+    }
     event.packet.header = packet.header;
     event.packet.kernelObject = packet.kernelObject;
     event.packet.kernargAddress = packet.kernargAddress;
+    event.packet.completionSignal = packet.completionSignal;
     event.originalKernelObject = packet.kernelObject;
     event.originalKernargAddress = packet.kernargAddress;
+    event.completionSignal = packet.completionSignal;
 
     const DispatchDecision decision = callbacks.onDispatch(event);
     if (decision == DispatchDecision::skip) {
@@ -195,9 +232,14 @@ void handlePacketWrite(const void* packets, uint64_t packetCount,
 
     modifiedPacket.kernelObject = event.packet.kernelObject;
     modifiedPacket.kernargAddress = event.packet.kernargAddress;
+    modifiedPacket.completionSignal = event.packet.completionSignal;
 
     if (writer) {
       writer(&modifiedPacket, 1);
+    }
+
+    if (writer && callbacks.onDispatchSubmitted) {
+      callbacks.onDispatchSubmitted(event);
     }
 
     if (modifiedPacket.kernelObject != packet.kernelObject ||

@@ -14,3 +14,18 @@ target_compile_definitions(hsa_kernel_loader_gtest
 )
 
 add_test(NAME HsaKernelLoaderGTest COMMAND hsa_kernel_loader_gtest)
+
+if(TARGET hsa_kernel_loader_hsa)
+  add_executable(hsa_kernel_loader_hsa_smoke_gtest
+    HsaKernelLoaderHsaSmokeGTest.cpp
+  )
+
+  target_link_libraries(hsa_kernel_loader_hsa_smoke_gtest
+    PRIVATE
+      hsa_kernel_loader_hsa
+      GTest::gtest_main
+  )
+
+  add_test(NAME HsaKernelLoaderHsaSmokeGTest
+           COMMAND hsa_kernel_loader_hsa_smoke_gtest)
+endif()

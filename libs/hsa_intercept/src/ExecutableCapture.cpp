@@ -355,7 +355,21 @@ extern "C" hsa_status_t hsa_executable_freeze(hsa_executable_t executable,
     return HSA_STATUS_ERROR;
   }
 
+  // #region agent log
+  aegis::hsa_intercept::detail::debugLog(
+      "ExecutableCapture.cpp:hsa_executable_freeze:entry",
+      "hsa_executable_freeze entered", "H5",
+      std::string("{\"executable\":") + std::to_string(executable.handle) +
+          "}");
+  // #endregion
   hsa_status_t status = realFn(executable, options);
+  // #region agent log
+  aegis::hsa_intercept::detail::debugLog(
+      "ExecutableCapture.cpp:hsa_executable_freeze:after-real",
+      "real hsa_executable_freeze returned", "H5",
+      std::string("{\"status\":") + std::to_string(static_cast<int>(status)) +
+          "}");
+  // #endregion
   if (status == HSA_STATUS_SUCCESS) {
     aegis::hsa_intercept::detail::captureExecutableState(executable.handle);
   }

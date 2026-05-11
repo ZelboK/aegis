@@ -20,6 +20,8 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 
+#include <array>
+#include <cctype>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
@@ -35,6 +37,7 @@ namespace amdgpu_instr_backend_llvm {
 namespace {
 
 using amdgpu_instr_backend::ByteView;
+using amdgpu_instr_backend::CountingRecordWrite;
 using amdgpu_instr_backend::Instruction;
 using amdgpu_instr_backend::InstructionBackend;
 using amdgpu_instr_backend::OpcodeInfo;
@@ -56,6 +59,65 @@ bool extractConstant(const llvm::MCOperand &Op, int64_t &Out) {
     return Expr && Expr->evaluateAsAbsolute(Out);
   }
   return false;
+}
+
+std::string lowerMnemonic(std::string Text) {
+  const size_t Start = Text.find_first_not_of(" \t\n");
+  if (Start == std::string::npos) {
+    return {};
+  }
+  Text.erase(0, Start);
+  const size_t Space = Text.find_first_of(" \t\n");
+  if (Space != std::string::npos) {
+    Text.resize(Space);
+  }
+  for (char &C : Text) {
+    C = static_cast<char>(std::tolower(static_cast<unsigned char>(C)));
+  }
+  return Text;
+}
+
+bool startsWith(const std::string &Value, const char *Prefix) {
+  const std::string PrefixText(Prefix);
+  return Value.size() >= PrefixText.size() &&
+         Value.compare(0, PrefixText.size(), PrefixText) == 0;
+}
+
+Instruction::MemoryKind classifyMemoryKind(const std::string &Mnemonic,
+                                           const llvm::MCInstrDesc &Desc) {
+  if (!Desc.mayLoad() && !Desc.mayStore()) {
+    return Instruction::MemoryKind::none;
+  }
+  if (startsWith(Mnemonic, "ds_")) {
+    return Instruction::MemoryKind::lds;
+  }
+  if (startsWith(Mnemonic, "global_") || startsWith(Mnemonic, "flat_") ||
+      startsWith(Mnemonic, "buffer_")) {
+    return Instruction::MemoryKind::global;
+  }
+  return Instruction::MemoryKind::other;
+}
+
+bool isArchVariant(const std::string &Name, const std::string &Mnemonic) {
+  static constexpr std::array<const char *, 7> Suffixes = {
+      "_vi", "_gfx940", "_gfx9", "_gfx10",
+      "_gfx11", "_gfx12", "_gfx6_gfx7"};
+  for (const char *Suffix : Suffixes) {
+    if (Name == Mnemonic + Suffix) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool isGeneralOpcodeVariant(const std::string &Name,
+                            const std::string &Mnemonic) {
+  const std::string Prefix = Mnemonic + "_";
+  if (Name.compare(0, Prefix.size(), Prefix) != 0) {
+    return false;
+  }
+  const std::string Suffix = Name.substr(Prefix.size());
+  return Suffix.find("gfx") != std::string::npos || Suffix == "vi";
 }
 
 class LlvmBackend final : public InstructionBackend {
@@ -143,6 +205,194 @@ public:
     return encodeMCInst(MI);
   }
 
+  Result<std::vector<uint8_t>>
+  encodeCountingRecordWrite(const CountingRecordWrite &request) const override {
+    constexpr uint64_t recordSize = 24;
+    constexpr uint32_t magic = 0x41475331u; // CountingPayloadRecordV1 "AGS1"
+    constexpr uint32_t version = 1;
+    if (request.bufferAddress == 0 || request.bufferSize < recordSize) {
+      return Result<std::vector<uint8_t>>::failure(
+          "counting record write requires a valid profiling buffer");
+    }
+    if (request.saveVgprIndex == request.addressVgprIndex ||
+        request.dataVgprIndex == request.addressVgprIndex ||
+        request.dataVgprIndex == request.saveVgprIndex) {
+      return Result<std::vector<uint8_t>>::failure(
+          "counting record write requires distinct address/save/data VGPR scratch");
+    }
+
+    const unsigned Addr = vgpr(request.addressVgprIndex);
+    const unsigned Save = vgpr(request.saveVgprIndex);
+    const unsigned Data = vgpr(request.dataVgprIndex);
+    const unsigned Spill0 = agpr(request.agprSpillBaseIndex);
+    const unsigned Spill1 = agpr(request.agprSpillBaseIndex + 1);
+    const unsigned Spill2 = agpr(request.agprSpillBaseIndex + 2);
+    auto S2OrErr = resolveSgprReg(2);
+    if (!S2OrErr) {
+      return Result<std::vector<uint8_t>>::failure(S2OrErr.error());
+    }
+    auto S3OrErr = resolveSgprReg(3);
+    if (!S3OrErr) {
+      return Result<std::vector<uint8_t>>::failure(S3OrErr.error());
+    }
+    const unsigned S2 = S2OrErr.value();
+    const unsigned S3 = S3OrErr.value();
+    std::array<unsigned, 8> LowSgprs{};
+    for (unsigned I = 0; I < LowSgprs.size(); ++I) {
+      auto Reg = resolveSgprReg(I);
+      if (!Reg) {
+        return Result<std::vector<uint8_t>>::failure(Reg.error());
+      }
+      LowSgprs[I] = Reg.value();
+    }
+    std::vector<uint8_t> bytes;
+
+    auto append = [&](Result<std::vector<uint8_t>> encoded) -> Result<bool> {
+      if (!encoded) {
+        return Result<bool>::failure(encoded.error());
+      }
+      auto value = encoded.takeValue();
+      bytes.insert(bytes.end(), value.begin(), value.end());
+      return Result<bool>::success(true);
+    };
+
+    auto emitMov = [&](unsigned dst, uint32_t imm) -> Result<bool> {
+      llvm::MCInst MI;
+      MI.setOpcode(AmdgpuOpcodes.VMovB32e32);
+      MI.addOperand(llvm::MCOperand::createReg(dst));
+      MI.addOperand(llvm::MCOperand::createImm(static_cast<int32_t>(imm)));
+      return append(encodeMCInst(MI));
+    };
+
+    auto emitSMov = [&](unsigned dst, uint32_t imm) -> Result<bool> {
+      llvm::MCInst MI;
+      MI.setOpcode(AmdgpuOpcodes.SMovB32);
+      MI.addOperand(llvm::MCOperand::createReg(dst));
+      MI.addOperand(llvm::MCOperand::createImm(static_cast<int32_t>(imm)));
+      return append(encodeMCInst(MI));
+    };
+
+    auto emitWriteLane = [&](unsigned dstVgpr, unsigned srcSgpr,
+                             unsigned lane) -> Result<bool> {
+      llvm::MCInst MI;
+      MI.setOpcode(AmdgpuOpcodes.VWriteLaneB32);
+      MI.addOperand(llvm::MCOperand::createReg(dstVgpr));
+      MI.addOperand(llvm::MCOperand::createReg(srcSgpr));
+      MI.addOperand(llvm::MCOperand::createImm(lane));
+      return append(encodeMCInst(MI));
+    };
+
+    auto emitReadLane = [&](unsigned dstSgpr, unsigned srcVgpr,
+                            unsigned lane) -> Result<bool> {
+      llvm::MCInst MI;
+      MI.setOpcode(AmdgpuOpcodes.VReadLaneB32);
+      MI.addOperand(llvm::MCOperand::createReg(dstSgpr));
+      MI.addOperand(llvm::MCOperand::createReg(srcVgpr));
+      MI.addOperand(llvm::MCOperand::createImm(lane));
+      return append(encodeMCInst(MI));
+    };
+
+    auto emitAccWrite = [&](unsigned dstAgpr, unsigned srcVgpr) -> Result<bool> {
+      llvm::MCInst MI;
+      MI.setOpcode(AmdgpuOpcodes.VAccvgprWriteB32);
+      MI.addOperand(llvm::MCOperand::createReg(dstAgpr));
+      MI.addOperand(llvm::MCOperand::createReg(srcVgpr));
+      return append(encodeMCInst(MI));
+    };
+
+    auto emitAccRead = [&](unsigned dstVgpr, unsigned srcAgpr) -> Result<bool> {
+      llvm::MCInst MI;
+      MI.setOpcode(AmdgpuOpcodes.VAccvgprReadB32);
+      MI.addOperand(llvm::MCOperand::createReg(dstVgpr));
+      MI.addOperand(llvm::MCOperand::createReg(srcAgpr));
+      return append(encodeMCInst(MI));
+    };
+
+    auto emitStore = [&](uint32_t value, int32_t offset) -> Result<bool> {
+      auto moveData = emitMov(Data, value);
+      if (!moveData) {
+        return moveData;
+      }
+      llvm::MCInst MI;
+      MI.setOpcode(AmdgpuOpcodes.GlobalStoreDwordSaddr);
+      MI.addOperand(llvm::MCOperand::createReg(Addr));
+      MI.addOperand(llvm::MCOperand::createReg(Data));
+      MI.addOperand(llvm::MCOperand::createReg(S2));
+      MI.addOperand(llvm::MCOperand::createImm(offset));
+      MI.addOperand(llvm::MCOperand::createImm(0));
+      return append(encodeMCInst(MI));
+    };
+
+    if (request.useAgprSpill) {
+      if (auto ok = emitAccWrite(Spill0, Addr); !ok) {
+        return Result<std::vector<uint8_t>>::failure(ok.error());
+      }
+      if (auto ok = emitAccWrite(Spill1, Save); !ok) {
+        return Result<std::vector<uint8_t>>::failure(ok.error());
+      }
+      if (auto ok = emitAccWrite(Spill2, Data); !ok) {
+        return Result<std::vector<uint8_t>>::failure(ok.error());
+      }
+    }
+
+    for (unsigned I = 0; I < LowSgprs.size(); ++I) {
+      if (auto ok = emitWriteLane(Save, LowSgprs[I], 10 + I); !ok) {
+        return Result<std::vector<uint8_t>>::failure(ok.error());
+      }
+    }
+    if (auto ok = emitSMov(S2, static_cast<uint32_t>(request.bufferAddress));
+        !ok) {
+      return Result<std::vector<uint8_t>>::failure(ok.error());
+    }
+    if (auto ok =
+            emitSMov(S3, static_cast<uint32_t>(request.bufferAddress >> 32));
+        !ok) {
+      return Result<std::vector<uint8_t>>::failure(ok.error());
+    }
+    if (auto ok = emitMov(Addr, 0);
+        !ok) {
+      return Result<std::vector<uint8_t>>::failure(ok.error());
+    }
+    if (auto ok = emitStore(magic, 0); !ok) {
+      return Result<std::vector<uint8_t>>::failure(ok.error());
+    }
+    if (auto ok = emitStore(version, 4); !ok) {
+      return Result<std::vector<uint8_t>>::failure(ok.error());
+    }
+    if (auto ok = emitStore(static_cast<uint32_t>(request.siteId), 8); !ok) {
+      return Result<std::vector<uint8_t>>::failure(ok.error());
+    }
+    if (auto ok = emitStore(static_cast<uint32_t>(request.siteId >> 32), 12);
+        !ok) {
+      return Result<std::vector<uint8_t>>::failure(ok.error());
+    }
+    if (auto ok = emitStore(static_cast<uint32_t>(request.value), 16); !ok) {
+      return Result<std::vector<uint8_t>>::failure(ok.error());
+    }
+    if (auto ok = emitStore(static_cast<uint32_t>(request.value >> 32), 20);
+        !ok) {
+      return Result<std::vector<uint8_t>>::failure(ok.error());
+    }
+    for (unsigned I = 0; I < LowSgprs.size(); ++I) {
+      if (auto ok = emitReadLane(LowSgprs[I], Save, 10 + I); !ok) {
+        return Result<std::vector<uint8_t>>::failure(ok.error());
+      }
+    }
+
+    if (request.useAgprSpill) {
+      if (auto ok = emitAccRead(Addr, Spill0); !ok) {
+        return Result<std::vector<uint8_t>>::failure(ok.error());
+      }
+      if (auto ok = emitAccRead(Save, Spill1); !ok) {
+        return Result<std::vector<uint8_t>>::failure(ok.error());
+      }
+      if (auto ok = emitAccRead(Data, Spill2); !ok) {
+        return Result<std::vector<uint8_t>>::failure(ok.error());
+      }
+    }
+    return Result<std::vector<uint8_t>>::success(std::move(bytes));
+  }
+
   Result<uint64_t> branchTarget(const Instruction &Inst,
                                 uint64_t CurrentPC) const override {
     if (!Inst.IsPCRelativeBranch || Inst.Operands.empty() ||
@@ -189,6 +439,47 @@ public:
         return E;
     }
 
+    {
+      uint8_t B[] = {0x80, 0x03, 0x80, 0xBE}; // s_mov_b32 s0, 0
+      if (auto E = tryDecodeOpcode(B, AmdgpuOpcodes.SMovB32))
+        return E;
+    }
+    auto VMov = findOpcodeByName("V_MOV_B32_e32");
+    if (!VMov) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     VMov.error());
+    }
+    AmdgpuOpcodes.VMovB32e32 = VMov.takeValue();
+    {
+      uint8_t B[] = {0x00, 0x00, 0x8A, 0xD2,
+                     0x00, 0x00, 0x01, 0x00}; // v_writelane_b32 v0,s0,0
+      if (auto E = tryDecodeOpcode(B, AmdgpuOpcodes.VWriteLaneB32))
+        return E;
+    }
+    {
+      uint8_t B[] = {0x00, 0x00, 0x89, 0xD2,
+                     0x00, 0x01, 0x01, 0x00}; // v_readlane_b32 s0,v0,0
+      if (auto E = tryDecodeOpcode(B, AmdgpuOpcodes.VReadLaneB32))
+        return E;
+    }
+    auto GlobalStore = findOpcodeByName("GLOBAL_STORE_DWORD_SADDR");
+    if (!GlobalStore) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     GlobalStore.error());
+    }
+    AmdgpuOpcodes.GlobalStoreDwordSaddr = GlobalStore.takeValue();
+    auto AccWrite = findOpcodeByName("V_ACCVGPR_WRITE_B32");
+    if (!AccWrite) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     AccWrite.error());
+    }
+    AmdgpuOpcodes.VAccvgprWriteB32 = AccWrite.takeValue();
+    auto AccRead = findOpcodeByName("V_ACCVGPR_READ_B32");
+    if (!AccRead) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     AccRead.error());
+    }
+    AmdgpuOpcodes.VAccvgprReadB32 = AccRead.takeValue();
     for (unsigned Index = 0; Index + 1 < 106; Index += 2) {
       auto InfoOrErr = resolveSgprPair(Index);
       if (!InfoOrErr) {
@@ -201,6 +492,26 @@ public:
   }
 
 private:
+  struct ExtraOpcodes {
+    unsigned SMovB32 = 0;
+    unsigned VMovB32e32 = 0;
+    unsigned VWriteLaneB32 = 0;
+    unsigned VReadLaneB32 = 0;
+    unsigned GlobalStoreDwordSaddr = 0;
+    unsigned VAccvgprWriteB32 = 0;
+    unsigned VAccvgprReadB32 = 0;
+  };
+
+  static unsigned vgpr(unsigned index) {
+    constexpr unsigned vgprBase = 486;
+    return vgprBase + index;
+  }
+
+  static unsigned agpr(unsigned index) {
+    constexpr unsigned agprBase = 51;
+    return agprBase + index;
+  }
+
   Result<std::vector<uint8_t>> encodeMCInst(const llvm::MCInst &Inst) const {
     llvm::SmallVector<char, 16> Code;
     llvm::SmallVector<llvm::MCFixup, 4> Fixups;
@@ -226,6 +537,15 @@ private:
     Out.Address = Address;
     Out.Size = Size;
     const llvm::MCInstrDesc &Desc = MCII->get(Inst.getOpcode());
+    std::string Printed;
+    llvm::raw_string_ostream OS(Printed);
+    Printer->printInst(&Inst, Address, "", *STI, OS);
+    OS.flush();
+    Out.Mnemonic = lowerMnemonic(Printed);
+    Out.MayLoad = Desc.mayLoad();
+    Out.MayStore = Desc.mayStore();
+    Out.IsTerminator = Desc.isTerminator();
+    Out.Memory = classifyMemoryKind(Out.Mnemonic, Desc);
     Out.IsPCRelativeBranch =
         Desc.isBranch() && !Desc.isReturn() && !Desc.isCall() &&
         Inst.getNumOperands() > 0 &&
@@ -235,6 +555,9 @@ private:
       const auto &Op = Inst.getOperand(I);
       if (Op.isReg()) {
         Out.Operands.push_back(Operand::reg(Op.getReg()));
+        if (Out.Memory != Instruction::MemoryKind::none) {
+          Out.AddressRegisters.push_back(Op.getReg());
+        }
         continue;
       }
       int64_t Imm = 0;
@@ -255,6 +578,40 @@ private:
     }
     Out = DI.value().BackendOpcode;
     return llvm::Error::success();
+  }
+
+  Result<unsigned> findOpcodeByName(const std::string &Mnemonic) const {
+    unsigned PseudoMatch = 0;
+    bool FoundPseudo = false;
+    unsigned VariantMatch = 0;
+    bool FoundVariant = false;
+    for (unsigned Opcode = 0, End = MCII->getNumOpcodes(); Opcode < End;
+         ++Opcode) {
+      const llvm::MCInstrDesc &Desc = MCII->get(Opcode);
+      std::string Name = MCII->getName(Opcode).str();
+      if (Name == Mnemonic) {
+        if (!Desc.isPseudo()) {
+          return Result<unsigned>::success(Opcode);
+        }
+        if (!FoundPseudo) {
+          PseudoMatch = Opcode;
+          FoundPseudo = true;
+        }
+      } else if (!FoundVariant &&
+                 (isArchVariant(Name, Mnemonic) ||
+                  isGeneralOpcodeVariant(Name, Mnemonic)) &&
+                 !Desc.isPseudo()) {
+        VariantMatch = Opcode;
+        FoundVariant = true;
+      }
+    }
+    if (FoundVariant) {
+      return Result<unsigned>::success(VariantMatch);
+    }
+    if (FoundPseudo) {
+      return Result<unsigned>::success(PseudoMatch);
+    }
+    return Result<unsigned>::failure("AMDGPU opcode not found: " + Mnemonic);
   }
 
   Result<unsigned> resolveSgprReg(unsigned Index) const {
@@ -313,6 +670,7 @@ private:
   std::unique_ptr<llvm::MCInstPrinter> Printer;
   const llvm::Target *TheTarget = nullptr;
   OpcodeInfo Opcodes;
+  ExtraOpcodes AmdgpuOpcodes;
   std::unordered_map<unsigned, SgprPairInfo> PairInfoByReg;
 };
 

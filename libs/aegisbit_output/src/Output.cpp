@@ -54,6 +54,8 @@ std::string renderRewriteSummary(
      << " instrumentation=" << instrumentationName(trace.plan.instrumentation)
      << " sites=" << trace.plan.selectedSites.size()
      << " patches=" << trace.patches.size()
+     << " payloads=" << trace.payloads.size()
+     << " trampolines=" << trace.trampolines.size()
      << " daisyChains=" << trace.daisyChains.size();
   return os.str();
 }
@@ -72,6 +74,8 @@ std::string renderRewriteTraceJson(
      << instrumentationName(trace.plan.instrumentation) << "\",";
   os << "\"siteCount\":" << trace.plan.selectedSites.size() << ",";
   os << "\"patchCount\":" << trace.patches.size() << ",";
+  os << "\"payloadCount\":" << trace.payloads.size() << ",";
+  os << "\"trampolineCount\":" << trace.trampolines.size() << ",";
   os << "\"daisyChainCount\":" << trace.daisyChains.size() << ",";
   os << "\"invariants\":[";
   for (size_t i = 0; i < trace.invariants.size(); ++i) {
@@ -100,9 +104,51 @@ std::string renderDispatchTraceJson(const DispatchTrace &trace) {
   os << "\"originalKernargAddress\":" << trace.originalKernargAddress << ",";
   os << "\"patchedKernargAddress\":" << trace.patchedKernargAddress << ",";
   os << "\"completionSignal\":" << trace.completionSignal << ",";
+  os << "\"profilingRecordCount\":" << trace.profilingRecordCount << ",";
+  os << "\"profilingRecords\":[";
+  for (size_t i = 0; i < trace.profilingRecords.size(); ++i) {
+    const auto &record = trace.profilingRecords[i];
+    if (i != 0) {
+      os << ",";
+    }
+    os << "{\"profileMode\":\"" << escapeJson(record.profileMode)
+       << "\",\"abi\":\"" << escapeJson(record.abi)
+       << "\",\"bufferAddress\":" << record.bufferAddress
+       << ",\"siteId\":" << record.siteId
+       << ",\"hitCount\":" << record.hitCount
+       << ",\"status\":\"" << escapeJson(record.status)
+       << "\",\"note\":\"" << escapeJson(record.note) << "\"}";
+  }
+  os << "],";
   os << "\"status\":\"" << escapeJson(trace.status) << "\",";
   os << "\"note\":\"" << escapeJson(trace.note) << "\"";
   os << "}";
+  return os.str();
+}
+
+std::string renderProfilingRecordsJson(
+    const std::vector<DispatchTrace> &dispatches) {
+  std::ostringstream os;
+  os << "{\"records\":[";
+  bool first = true;
+  for (const auto &dispatch : dispatches) {
+    for (const auto &record : dispatch.profilingRecords) {
+      if (!first) {
+        os << ",";
+      }
+      first = false;
+      os << "{\"dispatchId\":" << dispatch.dispatchId
+         << ",\"rewriteId\":\"" << escapeJson(dispatch.rewriteId)
+         << "\",\"profileMode\":\"" << escapeJson(record.profileMode)
+         << "\",\"abi\":\"" << escapeJson(record.abi)
+         << "\",\"bufferAddress\":" << record.bufferAddress
+         << ",\"siteId\":" << record.siteId
+         << ",\"hitCount\":" << record.hitCount
+         << ",\"status\":\"" << escapeJson(record.status)
+         << "\",\"note\":\"" << escapeJson(record.note) << "\"}";
+    }
+  }
+  os << "]}";
   return os.str();
 }
 
@@ -130,6 +176,15 @@ ReproducerBundle buildReproducerBundle(
     name << "dispatch_" << i << ".json";
     bundle.files.push_back(
         {name.str(), bytesFromString(renderDispatchTraceJson(dispatches[i]))});
+  }
+  bool hasProfilingRecords = false;
+  for (const auto &dispatch : dispatches) {
+    hasProfilingRecords |= !dispatch.profilingRecords.empty();
+  }
+  if (hasProfilingRecords) {
+    bundle.files.push_back({"profiling_records.json",
+                            bytesFromString(
+                                renderProfilingRecordsJson(dispatches))});
   }
   return bundle;
 }

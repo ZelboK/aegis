@@ -42,6 +42,10 @@ private:
 struct RuntimeOptions {
   bool enabled = true;
   bool liveNoopPatch = false;
+  std::string kernelNameFilter;
+  uint64_t countingBufferAddress = 0;
+  uint64_t countingBufferSize = 0;
+  bool deferCountingReadback = false;
   amdgpu_rewrite_core::RewriteOptions rewriteOptions;
 };
 
@@ -54,6 +58,7 @@ struct RuntimeStats {
   uint64_t loadedPatchedKernels = 0;
   uint64_t redirectedDispatches = 0;
   uint64_t hardFailedDispatches = 0;
+  uint64_t profilingRecords = 0;
 };
 
 struct RuntimeCallbacks {
@@ -67,7 +72,12 @@ public:
           const amdgpu_instr_backend::InstructionBackend *backend = nullptr,
           const amdgpu_code_object::CodeObjectParser *codeObjectParser = nullptr,
           hsa_kernel_loader::KernelLoader *kernelLoader = nullptr,
-          RuntimeCallbacks callbacks = {});
+          RuntimeCallbacks callbacks = {},
+          hsa_kernel_loader::ProfilingBufferAllocator *profilingAllocator = nullptr,
+          hsa_kernel_loader::DispatchCompletionObserver *completionObserver =
+              nullptr,
+          hsa_kernel_loader::AgentResourceProvider *agentResources = nullptr);
+  ~Runtime();
 
   [[nodiscard]] Status install();
   void uninstall();
@@ -88,12 +98,18 @@ public:
   void handleKernelSymbol(const aegis::hsa_intercept::CapturedKernelSymbol &symbol);
   aegis::hsa_intercept::DispatchDecision
   handleDispatch(aegis::hsa_intercept::DispatchEvent &event);
+  void handleDispatchSubmitted(
+      const aegis::hsa_intercept::DispatchEvent &event);
+  void flushPendingCountingDispatches();
 
 private:
   RuntimeOptions options_;
   const amdgpu_instr_backend::InstructionBackend *backend_ = nullptr;
   const amdgpu_code_object::CodeObjectParser *codeObjectParser_ = nullptr;
   hsa_kernel_loader::KernelLoader *kernelLoader_ = nullptr;
+  hsa_kernel_loader::ProfilingBufferAllocator *profilingAllocator_ = nullptr;
+  hsa_kernel_loader::DispatchCompletionObserver *completionObserver_ = nullptr;
+  hsa_kernel_loader::AgentResourceProvider *agentResources_ = nullptr;
   RuntimeCallbacks callbacks_;
 
   mutable std::mutex mutex_;
@@ -102,13 +118,50 @@ private:
     std::string rewriteId;
     std::string status;
     std::string error;
+    amdgpu_rewrite_core::InstrumentationLevel instrumentation =
+        amdgpu_rewrite_core::InstrumentationLevel::noopPatch;
+  };
+
+  struct LoadedKernelCacheKey {
+    uint64_t originalKernelObject = 0;
+    uint64_t queueAgent = 0;
+    amdgpu_rewrite_core::InstrumentationLevel instrumentation =
+        amdgpu_rewrite_core::InstrumentationLevel::noopPatch;
+    amdgpu_rewrite_core::ZeroSgprFlavor zeroSgprFlavor =
+        amdgpu_rewrite_core::ZeroSgprFlavor::withVgprBump;
+    uint64_t profilingBufferAddress = 0;
+
+    [[nodiscard]] bool operator<(const LoadedKernelCacheKey &other) const {
+      if (originalKernelObject != other.originalKernelObject)
+        return originalKernelObject < other.originalKernelObject;
+      if (queueAgent != other.queueAgent)
+        return queueAgent < other.queueAgent;
+      if (instrumentation != other.instrumentation)
+        return instrumentation < other.instrumentation;
+      if (zeroSgprFlavor != other.zeroSgprFlavor)
+        return zeroSgprFlavor < other.zeroSgprFlavor;
+      return profilingBufferAddress < other.profilingBufferAddress;
+    }
+  };
+
+  struct PendingCountingDispatch {
+    uint64_t bufferAddress = 0;
+    uint64_t bufferSize = 0;
+    size_t traceIndex = 0;
+    hsa_kernel_loader::DispatchCompletionObserver *completionObserver = nullptr;
+    uint64_t completionSignal = 0;
+    bool ownsCompletionSignal = false;
+    bool submitted = false;
   };
 
   RuntimeStats stats_;
   uint64_t nextDispatchId_ = 1;
+  hsa_kernel_loader::ProfilingBuffer ownedCountingBuffer_;
+  std::map<uint64_t, hsa_kernel_loader::ProfilingBuffer> agentCountingBuffers_;
   std::map<uint64_t, aegis::hsa_intercept::CapturedCodeObject> codeObjects_;
   std::map<uint64_t, aegis::hsa_intercept::CapturedKernelSymbol> symbols_;
-  std::map<uint64_t, LoadedKernelState> loadedKernels_;
+  std::map<LoadedKernelCacheKey, LoadedKernelState> loadedKernels_;
+  std::map<uint64_t, PendingCountingDispatch> pendingCountingDispatches_;
   std::vector<aegisbit_output::DispatchTrace> dispatchTraces_;
   std::optional<amdgpu_rewrite_core::RewriteResult> lastRewrite_;
 };

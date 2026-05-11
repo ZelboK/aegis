@@ -12,7 +12,7 @@
 namespace amdgpu_instr_backend_llvm {
 
 struct LlvmBackendOptions {
-  std::string CPU = "gfx942";
+  std::string CPU = "gfx950";
   std::string Features = "+wavefrontsize64";
   std::string TargetTriple = "amdgcn-amd-amdhsa";
 };
